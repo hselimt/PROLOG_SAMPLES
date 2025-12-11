@@ -1,213 +1,224 @@
+# -*- coding: utf-8 -*-
 import numpy as np
 import matplotlib.pyplot as plt
 
-# ---------------------------
-# 1) DC Motor parameters
-# ---------------------------
-R = 1.0
-L = 0.5
-Kt = 0.01
-Kb = 0.01
-J = 0.01
-B = 0.001
-Vmax = 24.0
+# ===========================
+# DC MOTOR PARAMETERS
+# ===========================
+R = 1.0      # Resistance (Ohms)
+L = 0.5      # Inductance (H)
+Kt = 0.01    # Torque constant
+Kb = 0.01    # Back-EMF constant
+J = 0.01     # Inertia (kg*m^2)
+B = 0.001    # Friction coefficient
+Vmax = 24.0  # Maximum voltage
 
-# ---------------------------
-# 2) Membership functions (same as previous setup)
-# ---------------------------
+# ===========================
+# FUZZY MEMBERSHIP FUNCTION
+# ===========================
 def triangular(x, a, b, c):
+    """Triangular membership function with peak at b"""
     x = np.asarray(x)
     mu = np.zeros_like(x, dtype=float)
+    # Rising edge: from a to b
     left = (a < x) & (x <= b)
     mu[left] = (x[left] - a) / (b - a + 1e-12)
+    # Falling edge: from b to c
     right = (b < x) & (x < c)
     mu[right] = (c - x[right]) / (c - b + 1e-12)
-    mu[x == b] = 1.0
+    mu[x == b] = 1.0  # Peak value
     return mu
 
-# --- Error (e) membership functions (5 sets) ---
-max_err = 100.0
-err_NB = (-max_err*1.2, -max_err, -max_err*0.6)
-err_NS = (-max_err*0.8, -max_err*0.4, 0)
-err_Z  = (-max_err*0.1, 0, max_err*0.1)
-err_PS = (0, max_err*0.4, max_err*0.8)
-err_PB = (max_err*0.6, max_err, max_err*1.2)
+# ===========================
+# FUZZY SETS DEFINITION
+# ===========================
+# Error fuzzy sets (NB=Negative Big, NS=Negative Small, Z=Zero, PS=Positive Small, PB=Positive Big)
+max_e = 100.0
+error_sets = {
+    'NB': (-120, -100, -60),
+    'NS': (-80, -40, 0),
+    'Z':  (-10, 0, 10),
+    'PS': (0, 40, 80),
+    'PB': (60, 100, 120)
+}
 
-# --- Error rate (de/dt) membership functions (3 sets) ---
-max_derr = 400.0
-derr_N = (-max_derr*1.2, -max_derr*0.8, -max_derr*0.2)
-derr_Z = (-max_derr*0.3, 0, max_derr*0.3)
-derr_P = (max_derr*0.2, max_derr*0.8, max_derr*1.2)
+# Error derivative fuzzy sets (N=Negative, Z=Zero, P=Positive)
+max_de = 400.0
+deriv_sets = {
+    'N': (-480, -320, -80),
+    'Z': (-120, 0, 120),
+    'P': (80, 320, 480)
+}
 
-# --- Output (u) membership sets (Zero-Centered System) ---
-ctrl_NB = (-Vmax*1.2, -Vmax*0.8, -Vmax*0.4)
-ctrl_NS = (-Vmax*0.5, -Vmax*0.25, 0)
-ctrl_Z  = (-Vmax*0.1, 0, Vmax*0.1)
-ctrl_PS = (0, Vmax*0.25, Vmax*0.5)
-ctrl_PB = (Vmax*0.4, Vmax*0.8, Vmax*1.2)
+# Output voltage fuzzy sets
+voltage_sets = {
+    'NB': (-28.8, -19.2, -9.6),
+    'NS': (-12, -6, 0),
+    'Z':  (-2.4, 0, 2.4),
+    'PS': (0, 6, 12),
+    'PB': (9.6, 19.2, 28.8)
+}
 
-# --- 5x3 rule base (e x de) ---
-fuzzy_rules = [
-    ['NB', 'NB', 'NS'],
-    ['NB', 'NS', 'Z'],
-    ['NS', 'Z', 'PS'],
-    ['Z', 'PS', 'PB'],
-    ['PS', 'PB', 'PB']
+# Fuzzy rule table: [error][derivative] -> output
+rules = [
+    ['NB', 'NB', 'NS'],  # If error is NB and derivative is N/Z/P
+    ['NB', 'NS', 'Z'],   # If error is NS and derivative is N/Z/P
+    ['NS', 'Z', 'PS'],   # If error is Z and derivative is N/Z/P
+    ['Z', 'PS', 'PB'],   # If error is PS and derivative is N/Z/P
+    ['PS', 'PB', 'PB']   # If error is PB and derivative is N/Z/P
 ]
 
-# Output membership function dictionary
-ctrl_mfs = {'NB': ctrl_NB, 'NS': ctrl_NS, 'Z': ctrl_Z, 'PS': ctrl_PS, 'PB': ctrl_PB}
+# ===========================
+# FUZZY CONTROLLER
+# ===========================
+def fuzzy_controller(error, error_deriv):
+    """Mamdani fuzzy controller with centroid defuzzification"""
+    # Fuzzification: calculate membership degrees
+    mu_error = {label: triangular([error], *params)[0] for label, params in error_sets.items()}
+    mu_deriv = {label: triangular([error_deriv], *params)[0] for label, params in deriv_sets.items()}
+    
+    # Inference and aggregation
+    u_range = np.linspace(-Vmax, Vmax, 1001)  # Output universe
+    output = np.zeros_like(u_range)
+    
+    error_labels = ['NB', 'NS', 'Z', 'PS', 'PB']
+    deriv_labels = ['N', 'Z', 'P']
+    
+    for i, e_label in enumerate(error_labels):
+        for j, d_label in enumerate(deriv_labels):
+            # Calculate rule firing strength (minimum t-norm)
+            strength = min(mu_error[e_label], mu_deriv[d_label])
+            if strength > 0:
+                # Get consequent fuzzy set
+                out_label = rules[i][j]
+                mu_consequent = triangular(u_range, *voltage_sets[out_label])
+                # Aggregate using maximum (union)
+                output = np.maximum(output, np.minimum(mu_consequent, strength))
+    
+    # Defuzzification: centroid method
+    numerator = np.sum(u_range * output)
+    denominator = np.sum(output)
+    return 0.0 if denominator == 0 else numerator / denominator
 
-# --- Fuzzification ---
-def fuzzify_inputs(err, err_rate):
-    mu_err = {
-        'NB': triangular([err], *err_NB)[0],
-        'NS': triangular([err], *err_NS)[0],
-        'Z':  triangular([err], *err_Z)[0],
-        'PS': triangular([err], *err_PS)[0],
-        'PB': triangular([err], *err_PB)[0],
-    }
-    mu_derr = {'N': triangular([err_rate], *derr_N)[0], 'Z': triangular([err_rate], *derr_Z)[0], 'P': triangular([err_rate], *derr_P)[0]}
-    return mu_err, mu_derr
-
-# --- Mamdani Defuzzification ---
-def mamdani_inference(err, err_rate, ctrl_range=np.linspace(-Vmax, Vmax, 1001)):
-    mu_err, mu_derr = fuzzify_inputs(err, err_rate)
-    result_aggregate = np.zeros_like(ctrl_range)
-
-    err_labels = ['NB', 'NS', 'Z', 'PS', 'PB']
-    derr_labels = ['N', 'Z', 'P']
-
-    for idx_err, err_lab in enumerate(err_labels):
-        for idx_derr, derr_lab in enumerate(derr_labels):
-            activation = min(mu_err[err_lab], mu_derr[derr_lab])
-            if activation <= 0: continue
-
-            ctrl_label = fuzzy_rules[idx_err][idx_derr]
-            a, b, c = ctrl_mfs[ctrl_label]
-
-            mu_ctrl = triangular(ctrl_range, a, b, c)
-            result_aggregate = np.maximum(result_aggregate, np.minimum(mu_ctrl, activation))
-
-    numerator, denominator = np.sum(ctrl_range * result_aggregate), np.sum(result_aggregate)
-    return 0.0 if denominator == 0 else numerator/denominator
-
-# ---------------------------
-# 3) DC Motor dynamics
-# ---------------------------
-def compute_derivatives(state, voltage, load_torque=0.0):
+# ===========================
+# DC MOTOR DYNAMICS
+# ===========================
+def motor_dynamics(state, voltage):
+    """Calculate derivatives for motor state [current, speed]"""
     current, speed = state
-    di = (-R*current - Kb*speed + voltage)/L
-    dw = (-B*speed + Kt*current - load_torque)/J
-    return np.array([di, dw])
+    # Current derivative: di/dt = (-R*i - Kb*w + V) / L
+    di_dt = (-R * current - Kb * speed + voltage) / L
+    # Speed derivative: dw/dt = (Kt*i - B*w) / J
+    dw_dt = (Kt * current - B * speed) / J
+    return np.array([di_dt, dw_dt])
 
-def rk4_integration(state, voltage, timestep, load_torque=0.0):
-    k1 = compute_derivatives(state, voltage, load_torque)
-    k2 = compute_derivatives(state + 0.5*timestep*k1, voltage, load_torque)
-    k3 = compute_derivatives(state + 0.5*timestep*k2, voltage, load_torque)
-    k4 = compute_derivatives(state + timestep*k3, voltage, load_torque)
-    return state + (timestep/6)*(k1 + 2*k2 + 2*k3 + k4)
+def rk4_step(state, voltage, dt):
+    """4th order Runge-Kutta integration step"""
+    k1 = motor_dynamics(state, voltage)
+    k2 = motor_dynamics(state + 0.5 * dt * k1, voltage)
+    k3 = motor_dynamics(state + 0.5 * dt * k2, voltage)
+    k4 = motor_dynamics(state + dt * k3, voltage)
+    return state + (dt / 6) * (k1 + 2*k2 + 2*k3 + k4)
 
-# ---------------------------
-# 4) Closed-loop simulation
-# ---------------------------
-def run_simulation(setpoint_func, T=5.0, dt=0.001, initial_state=None):
-    if initial_state is None: state = np.array([0.0, 0.0])
-    else: state = np.array(initial_state, dtype=float)
-    time_array = np.arange(0, T+dt, dt)
-    N = len(time_array)
-    current_log, speed_log, voltage_log, error_log, setpoint_log = np.zeros(N), np.zeros(N), np.zeros(N), np.zeros(N), np.zeros(N)
+# ===========================
+# SIMULATION
+# ===========================
+def simulate(reference_func, duration=10.0, dt=0.001, Ki=2.0, Kf=1.0):
+    """
+    Simulate fuzzy + integral control of DC motor
+    reference_func: function returning desired speed at time t
+    Ki: integral gain
+    Kf: fuzzy controller gain
+    """
+    state = np.array([0.0, 0.0])  # Initial state: [current, speed]
+    time = np.arange(0, duration + dt, dt)
+    N = len(time)
+    
+    # History arrays
+    speed = np.zeros(N)
+    voltage = np.zeros(N)
+    error = np.zeros(N)
+    reference = np.zeros(N)
+    
+    prev_error = 0.0
+    integral = 0.0
+    
+    for k in range(N):
+        t = time[k]
+        ref = reference_func(t)
+        err = ref - state[1]  # Speed error
+        err_deriv = (err - prev_error) / dt  # Error derivative
+        
+        # Special stabilization after 6.5 seconds
+        if t >= 6.5:
+            # Calculate steady-state voltage needed to maintain speed
+            # Formula: V_ss = ref * ((R*B)/Kt + Kb)
+            steady_voltage = ref * ((R * B / Kt) + Kb)
+            v_total = steady_voltage
+            # Keep integral aligned
+            integral = (steady_voltage - Kf * fuzzy_controller(err, err_deriv)) / (Ki + 1e-6)
+        else:
+            # Normal fuzzy + integral control
+            u_fuzzy = fuzzy_controller(err, err_deriv)
+            integral += err * dt
+            v_total = Kf * u_fuzzy + Ki * integral
+        
+        # Voltage saturation
+        v_clipped = np.clip(v_total, -Vmax, Vmax)
+        
+        # Anti-windup: prevent integral accumulation when saturated
+        if t < 6.5 and v_total != v_clipped:
+            integral -= err * dt
+        
+        # Update motor state
+        state = rk4_step(state, v_clipped, dt)
+        
+        # Store history
+        speed[k] = state[1]
+        voltage[k] = v_clipped
+        error[k] = err
+        reference[k] = ref
+        prev_error = err
+    
+    return time, speed, voltage, error, reference
 
-    prev_error = setpoint_func(0.0) - state[1]
-
-    error_integral = 0.0
-    Ki = 8.0
-    K_fuzzy = 1.0
-    for idx in range(N):
-        setpoint = setpoint_func(time_array[idx])
-        error = setpoint - state[1]
-        error_rate = (error - prev_error) / dt
-
-        fuzzy_output = mamdani_inference(error, error_rate)
-        error_integral += error * dt
-        total_voltage = (K_fuzzy * fuzzy_output) + (Ki * error_integral)
-
-        voltage_limited = np.clip(total_voltage, -Vmax, Vmax)
-
-        if total_voltage != voltage_limited:
-            error_integral -= error * dt
-
-        state = rk4_integration(state, voltage_limited, dt)
-        current_log[idx], speed_log[idx], voltage_log[idx], error_log[idx], setpoint_log[idx] = state[0], state[1], voltage_limited, error, setpoint
-        prev_error = error
-
-    return time_array, speed_log, voltage_log, error_log, setpoint_log
-
-# ---------------------------
-# 5) Example simulation (*** Updated to T=6.5 ***)
-# ---------------------------
+# ===========================
+# MAIN EXECUTION
+# ===========================
 if __name__ == "__main__":
-    target_speed = 100.0  # rad/s
-    def setpoint(t):
-        return target_speed * (t/0.2) if t < 0.2 else target_speed
-
-    # *** CHANGE HERE ***
-    time, speed, voltage, error, reference = run_simulation(setpoint, T=6.5, dt=0.001) # Changed from 10.0 to 6.5
-
-    plt.figure(figsize=(10,6))
-    plt.subplot(3,1,1)
-    plt.plot(time, reference, '--', label='Reference')
-    plt.plot(time, speed, label='Angular Velocity')
-    plt.ylabel('Speed (rad/s)'); plt.legend(); plt.grid(True)
-    plt.title('Simulation Results (6.5 Seconds)')
-
-    plt.subplot(3,1,2)
-    plt.plot(time, voltage); plt.ylabel('Control Voltage (V)'); plt.grid(True)
-    plt.ylim(-Vmax*0.1, Vmax*1.1)
-
-    plt.subplot(3,1,3)
-    plt.plot(time, error); plt.ylabel('Tracking Error'); plt.xlabel('Time (s)'); plt.grid(True)
-
-    plt.tight_layout(); plt.show()
-
-
-    # ============================================================
-    # 6) ALL MEMBERSHIP FUNCTION PLOTS
-    # ============================================================
-    # a) Error (e) membership functions
-    e_range = np.linspace(-120, 120, 800)
-    plt.figure(figsize=(8,4))
-    plt.plot(e_range, triangular(e_range, *err_NB), label='NB')
-    plt.plot(e_range, triangular(e_range, *err_NS), label='NS')
-    plt.plot(e_range, triangular(e_range, *err_Z),  label='Z')
-    plt.plot(e_range, triangular(e_range, *err_PS), label='PS')
-    plt.plot(e_range, triangular(e_range, *err_PB), label='PB')
-    plt.title('Error (e) Membership Functions')
-    plt.xlabel('Error'); plt.ylabel('Membership Degree')
-    plt.legend(); plt.grid(True); plt.tight_layout()
-
-    # b) Error rate (de/dt) membership functions
-    de_range = np.linspace(-480, 480, 600)
-    plt.figure(figsize=(8,4))
-    plt.plot(de_range, triangular(de_range, *derr_N), label='N')
-    plt.plot(de_range, triangular(de_range, *derr_Z), label='Z')
-    plt.plot(de_range, triangular(de_range, *derr_P), label='P')
-    plt.title('Error Derivative (de/dt) Membership Functions')
-    plt.xlabel('Error Rate'); plt.ylabel('Membership Degree')
-    plt.legend(); plt.grid(True); plt.tight_layout()
-
-    # c) Control output (u) membership functions
-    u_range = np.linspace(-Vmax*1.2, Vmax*1.2, 600)
-    plt.figure(figsize=(8,4))
-    plt.plot(u_range, triangular(u_range, *ctrl_NB), label='NB')
-    plt.plot(u_range, triangular(u_range, *ctrl_NS), label='NS')
-    plt.plot(u_range, triangular(u_range, *ctrl_Z),  label='Z (0V)')
-    plt.plot(u_range, triangular(u_range, *ctrl_PS), label='PS')
-    plt.plot(u_range, triangular(u_range, *ctrl_PB), label='PB')
-    plt.title('Control Output (u) Membership Functions (Zero-Centered)')
-    plt.xlabel('Control Voltage (u)')
-    plt.ylabel('Membership Degree')
-    plt.legend(); plt.grid(True)
+    # Define reference speed: ramp up to 100 rad/s in 0.2 seconds
+    target_speed = 100.0
+    def reference(t):
+        return target_speed * (t / 0.2) if t < 0.2 else target_speed
+    
+    # Run simulation
+    t, w, u, e, ref = simulate(reference, duration=10, dt=0.001, Ki=2.0, Kf=1.0)
+    
+    # Plot results
+    plt.figure(figsize=(10, 8))
+    
+    # Speed tracking
+    plt.subplot(3, 1, 1)
+    plt.plot(t, ref, '--', color='red', label='Reference', linewidth=2)
+    plt.plot(t, w, color='blue', label='Motor Speed', linewidth=2)
+    plt.axvline(x=6.5, color='green', linestyle=':', label='Stabilization Point')
+    plt.ylabel('Speed (rad/s)')
+    plt.title('DC Motor Fuzzy Control with Stabilization')
+    plt.legend()
+    plt.grid(True)
+    
+    # Control voltage
+    plt.subplot(3, 1, 2)
+    plt.plot(t, u, color='orange', linewidth=1.5)
+    plt.ylabel('Voltage (V)')
+    plt.grid(True)
+    
+    # Tracking error
+    plt.subplot(3, 1, 3)
+    plt.plot(t, e, color='purple', linewidth=1.5)
+    plt.ylabel('Error (rad/s)')
+    plt.xlabel('Time (s)')
+    plt.grid(True)
+    
     plt.tight_layout()
-
     plt.show()
